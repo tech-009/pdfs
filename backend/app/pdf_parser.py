@@ -96,6 +96,21 @@ def _decode_flags(flags: int) -> Tuple[bool, bool, bool, bool]:
 
 def parse_pdf(path: str, document_id: str, filename: str) -> DocumentModel:
     doc = fitz.open(path)
+    try:
+        return _parse_opened_pdf(doc, document_id, filename)
+    finally:
+        # Always released, even if parsing raises partway through a page —
+        # otherwise a bad upload leaks a file handle every time.
+        doc.close()
+
+
+def _parse_opened_pdf(doc: "fitz.Document", document_id: str, filename: str) -> DocumentModel:
+    if doc.is_encrypted:
+        # fitz.open() succeeds even on a password-protected file; it just
+        # can't read content until authenticated. Fail clearly here instead
+        # of returning a document with zero text elements and no explanation.
+        raise ValueError("PDF is password-protected/encrypted.")
+
     pages: list[Page] = []
 
     for page_index in range(doc.page_count):
@@ -176,8 +191,6 @@ def parse_pdf(path: str, document_id: str, filename: str) -> DocumentModel:
                 image_elements=image_elements,
             )
         )
-
-    doc.close()
 
     return DocumentModel(
         id=document_id,

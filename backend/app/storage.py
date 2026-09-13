@@ -15,6 +15,7 @@ Swapping this out later:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -32,6 +33,15 @@ class DocumentRecord:
     original_path: str
     edits: Dict[str, str] = field(default_factory=dict)  # element_id -> new text
     exported_path: Optional[str] = None
+    # Bumped on every edit/replace; compared against `exported_edits_version`
+    # so we always know whether the last export on disk is stale relative
+    # to the in-memory edits. This is what prevents "download gave me an
+    # old version" — see main.py's download route.
+    edits_version: int = 0
+    exported_edits_version: int = -1
+    # Serializes export/download for a single document so two overlapping
+    # requests can't both write `exported_path + ".tmp"` at once.
+    export_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class DocumentStore:

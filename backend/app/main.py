@@ -37,7 +37,7 @@ from .models import (
     ExportResponse,
 )
 from .pdf_parser import parse_pdf
-from .pdf_reconstructor import export_pdf
+from .pdf_reconstructor import export_pdf, PdfExportError
 from .storage import store, DocumentRecord
 
 logging.basicConfig(level=logging.INFO)
@@ -98,6 +98,8 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as exc:
         logger.exception("Failed to parse uploaded PDF")
         # Deliberately generic message to the client — never leak internals.
+        # parse_pdf/fitz.open always close their own Document handle even
+        # on failure (see pdf_parser.py), so no fd/memory leak here.
         raise HTTPException(status_code=422, detail="Could not process this PDF. It may be corrupted, encrypted, or password-protected.") from exc
 
     store.put(document_id, DocumentRecord(document=document, original_path=original_path))
@@ -127,6 +129,7 @@ async def edit_element(document_id: str, element_id: str, body: TextEditRequest)
         raise HTTPException(status_code=404, detail="Text element not found on this document.")
 
     record.edits[element_id] = body.text
+    record.edits_version += 1  # marks any existing export as stale
     return {"element_id": element_id, "text": body.text}
 
 
@@ -153,7 +156,46 @@ async def replace_in_document(document_id: str, body: ReplaceRequest):
         body.whole_word,
         body.replace_all,
     )
+    if updated_ids:
+        record.edits_version += 1  # marks any existing export as stale
     return ReplaceResponse(replaced_count=count, updated_element_ids=updated_ids)
+
+
+def _download_filename(original_filename: str) -> str:
+    stem, ext = os.path.splitext(original_filename or "document.pdf")
+    if ext.lower() != ".pdf":
+        ext = ".pdf"
+    return f"{stem}-edited{ext}"
+
+
+async def _ensure_export_is_current(document_id: str, record: DocumentRecord) -> str:
+    """Regenerates the exported PDF from the live edits dict if (and only
+    if) it's out of date, then returns the path to a file that is
+    guaranteed to reflect the current edit state. This is the single
+    choke point that prevents a stale/old-version download: nothing
+    downstream of this function ever sees a path written from an older
+    `edits` snapshot than the one in memory right now."""
+    async with record.export_lock:
+        # Re-check inside the lock: another concurrent request may have
+        # just finished the exact export we were about to do.
+        if record.exported_path and record.exported_edits_version == record.edits_version and os.path.exists(record.exported_path):
+            return record.exported_path
+
+        output_path = store.export_path_for(document_id)
+        edits_snapshot = dict(record.edits)  # freeze what we're exporting
+        target_version = record.edits_version
+        try:
+            export_pdf(record.original_path, output_path, record.document, edits_snapshot)
+        except PdfExportError as exc:
+            logger.exception("Failed to export PDF: %s", exc)
+            raise HTTPException(status_code=500, detail="Failed to generate the edited PDF. Please try again.") from exc
+        except Exception as exc:
+            logger.exception("Unexpected error exporting PDF")
+            raise HTTPException(status_code=500, detail="Failed to generate the edited PDF. Please try again.") from exc
+
+        record.exported_path = output_path
+        record.exported_edits_version = target_version
+        return output_path
 
 
 @app.post("/documents/{document_id}/export", response_model=ExportResponse)
@@ -162,26 +204,24 @@ async def export_document(document_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    output_path = store.export_path_for(document_id)
-    try:
-        export_pdf(record.original_path, output_path, record.document, record.edits)
-    except Exception as exc:
-        logger.exception("Failed to export PDF")
-        raise HTTPException(status_code=500, detail="Failed to generate the edited PDF.") from exc
-
-    record.exported_path = output_path
+    await _ensure_export_is_current(document_id, record)
     return ExportResponse(document_id=document_id, download_url=f"/documents/{document_id}/download")
 
 
 @app.get("/documents/{document_id}/download")
 async def download_document(document_id: str):
     record = store.get(document_id)
-    if record is None or not record.exported_path or not os.path.exists(record.exported_path):
-        raise HTTPException(status_code=404, detail="No exported file available. Export the document first.")
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    # Always regenerate if edits have changed since the last export —
+    # download never hands back a version older than the current edit
+    # state, even if the client forgot to call /export again first.
+    output_path = await _ensure_export_is_current(document_id, record)
     return FileResponse(
-        record.exported_path,
+        output_path,
         media_type="application/pdf",
-        filename=f"edited_{record.document.filename}",
+        filename=_download_filename(record.document.filename),
     )
 
 
