@@ -1,0 +1,16 @@
+{
+  "name": "pdf-editor-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static test-harness frontend for the PDF text-editing core, served with runtime-injected backend API URL.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

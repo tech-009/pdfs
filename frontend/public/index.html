@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>PDF Text-Editing Core — Test Harness</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; background: #f4f5f7; color: #1c1e21; }
+  header { background: #1c1e21; color: white; padding: 14px 20px; font-size: 15px; }
+  header b { color: #ffb454; }
+  .layout { display: flex; height: calc(100vh - 48px); }
+  .left { width: 340px; padding: 16px; background: white; border-right: 1px solid #ddd; overflow-y: auto; }
+  .right { flex: 1; padding: 16px; overflow-y: auto; }
+  h3 { margin-top: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #666; }
+  input[type=text] { width: 100%; padding: 6px 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+  button { background: #2563eb; color: white; border: none; padding: 7px 12px; border-radius: 4px; font-size: 13px; cursor: pointer; margin-top: 6px; }
+  button.secondary { background: #eee; color: #222; }
+  button:hover { filter: brightness(1.08); }
+  .page-block { background: white; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 16px; padding: 12px; }
+  .page-block h4 { margin: 0 0 8px; font-size: 12px; color: #888; font-weight: 600; }
+  .element-row { display: flex; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid #f0f0f0; }
+  .element-row:last-child { border-bottom: none; }
+  .meta { font-size: 10px; color: #999; width: 170px; flex-shrink: 0; }
+  .element-row input { flex: 1; }
+  .edited { background: #fff8e1 !important; }
+  #status { font-size: 12px; margin-top: 8px; color: #555; }
+  .row { display: flex; gap: 6px; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<script src="/config.js"></script>
+<header>PDF Text-Editing Core — <b>Test Harness</b> (not the final desktop UI — see README)</header>
+<div class="layout">
+  <div class="left">
+    <h3>1. Upload</h3>
+    <input type="file" id="fileInput" accept="application/pdf" />
+    <div id="status"></div>
+
+    <h3 style="margin-top:20px;">2. Search &amp; Replace</h3>
+    <div class="row"><input type="text" id="searchQuery" placeholder="Find..." /></div>
+    <div class="row"><input type="text" id="replaceText" placeholder="Replace with..." /></div>
+    <div class="row">
+      <label style="font-size:12px;"><input type="checkbox" id="caseSensitive" /> Case sensitive</label>
+    </div>
+    <div class="row">
+      <label style="font-size:12px;"><input type="checkbox" id="wholeWord" /> Whole word</label>
+    </div>
+    <div class="row">
+      <button onclick="doSearch()">Search</button>
+      <button class="secondary" onclick="doReplace()">Replace all</button>
+    </div>
+    <div id="searchResults" style="font-size:12px; margin-top:8px;"></div>
+
+    <h3 style="margin-top:20px;">3. Export</h3>
+    <button onclick="doExport()">Export edited PDF</button>
+    <div id="exportStatus" style="font-size:12px; margin-top:8px;"></div>
+  </div>
+
+  <div class="right" id="pagesContainer">
+    <p style="color:#999;">Upload a PDF to see its extracted, per-run editable text elements — real font, size, color and position, read straight out of the PDF content stream.</p>
+  </div>
+</div>
+
+<script>
+// window.__API_BASE__ is injected at request time by server.js from the
+// API_BASE_URL environment variable — see /config.js. Falls back to
+// localhost for local dev without the Node server (e.g. opening this
+// file directly, or `python -m http.server`).
+const API = window.__API_BASE__ || "http://localhost:8000";
+let documentId = null;
+let documentModel = null;
+
+document.getElementById("fileInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  setStatus("Uploading & parsing...");
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const res = await fetch(`${API}/documents`, { method: "POST", body: form });
+    if (!res.ok) throw new Error((await res.json()).detail || "Upload failed");
+    documentModel = await res.json();
+    documentId = documentModel.id;
+    setStatus(`Loaded "${documentModel.filename}" — ${documentModel.page_count} page(s).`);
+    renderPages();
+  } catch (err) {
+    setStatus("Error: " + err.message);
+  }
+});
+
+function setStatus(msg) { document.getElementById("status").textContent = msg; }
+
+function renderPages() {
+  const container = document.getElementById("pagesContainer");
+  container.innerHTML = "";
+  documentModel.pages.forEach(page => {
+    const block = document.createElement("div");
+    block.className = "page-block";
+    block.innerHTML = `<h4>Page ${page.number + 1} — ${Math.round(page.width)}×${Math.round(page.height)}pt, ${page.text_elements.length} text runs, ${page.image_elements.length} images</h4>`;
+    page.text_elements.forEach(el => {
+      const row = document.createElement("div");
+      row.className = "element-row";
+      row.innerHTML = `
+        <span class="meta">${el.font_family}, ${Math.round(el.font_size)}pt${el.font_weight === 'bold' ? ', bold' : ''}${el.font_style === 'italic' ? ', italic' : ''}, <span style="color:${el.color}">■</span></span>
+        <input type="text" value="${escapeAttr(el.text)}" data-id="${el.id}" />
+      `;
+      const input = row.querySelector("input");
+      input.addEventListener("change", () => editElement(el.id, input.value, input));
+      container.appendChild(row);
+      block.appendChild(row);
+    });
+    container.appendChild(block);
+  });
+}
+
+function escapeAttr(s) { return s.replace(/"/g, "&quot;"); }
+
+async function editElement(elementId, newText, inputEl) {
+  const res = await fetch(`${API}/documents/${documentId}/elements/${elementId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: newText }),
+  });
+  if (res.ok) {
+    inputEl.classList.add("edited");
+    setStatus("Edit saved locally — click Export to generate the real PDF.");
+  } else {
+    setStatus("Edit failed: " + (await res.json()).detail);
+  }
+}
+
+async function doSearch() {
+  const query = document.getElementById("searchQuery").value;
+  const case_sensitive = document.getElementById("caseSensitive").checked;
+  const whole_word = document.getElementById("wholeWord").checked;
+  const res = await fetch(`${API}/documents/${documentId}/search`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, case_sensitive, whole_word }),
+  });
+  const matches = await res.json();
+  document.getElementById("searchResults").innerHTML =
+    matches.length
+      ? `${matches.length} match(es): ` + matches.map(m => `p${m.page + 1}: "${m.text}"`).join("<br/>")
+      : "No matches.";
+}
+
+async function doReplace() {
+  const query = document.getElementById("searchQuery").value;
+  const replacement = document.getElementById("replaceText").value;
+  const case_sensitive = document.getElementById("caseSensitive").checked;
+  const whole_word = document.getElementById("wholeWord").checked;
+  const res = await fetch(`${API}/documents/${documentId}/replace`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, replacement, case_sensitive, whole_word, replace_all: true }),
+  });
+  const result = await res.json();
+  setStatus(`Replaced ${result.replaced_count} occurrence(s).`);
+  // refresh the model to reflect the replacement in the UI
+  const docRes = await fetch(`${API}/documents/${documentId}`);
+  documentModel = await docRes.json();
+  renderPages();
+}
+
+async function doExport() {
+  document.getElementById("exportStatus").textContent = "Exporting...";
+  const res = await fetch(`${API}/documents/${documentId}/export`, { method: "POST" });
+  if (!res.ok) {
+    document.getElementById("exportStatus").textContent = "Export failed: " + (await res.json()).detail;
+    return;
+  }
+  const result = await res.json();
+  document.getElementById("exportStatus").innerHTML =
+    `<a href="${API}${result.download_url}" target="_blank">Download edited PDF</a>`;
+}
+</script>
+</body>
+</html>
