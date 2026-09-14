@@ -53,6 +53,61 @@ class PdfExportError(RuntimeError):
     underlying PyMuPDF error to the client."""
 
 
+# ---------------------------------------------------------------------------
+# Unicode (Bengali) text support.
+#
+# PyMuPDF's base-14 reconstruction fonts (Helvetica/Times/Courier — see
+# pdf_parser.map_font) only cover Latin-1. Re-inserting Bengali text with
+# one of those fonts silently produces blank/garbled glyphs — the exact
+# "broken box" failure the spec calls out. Any text being (re)inserted
+# that contains Bengali script characters is routed through an embedded
+# Noto Sans Bengali font instead, which also covers basic Latin, so
+# mixed Bengali+English spans render correctly with a single font.
+# ---------------------------------------------------------------------------
+_BENGALI_FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "NotoSansBengali.ttf")
+_UNICODE_FONTNAME = "SMPDFNotoBengali"
+
+
+def _contains_bengali(text: str) -> bool:
+    return any("\u0980" <= ch <= "\u09FF" for ch in text)
+
+
+def _insert_textbox_fit(
+    page: "fitz.Page", rect: "fitz.Rect", text: str, fontsize: float, fontname: str,
+    color: tuple, align: int, min_fontsize: float = 6.0, max_expand: float = 200.0,
+) -> float:
+    """insert_textbox() at a FIXED fontsize simply fails (returns a
+    negative "deficit area") if the text doesn't fit the rect — it does
+    NOT auto-shrink despite that being assumed elsewhere in this module.
+    Left as-is, that turns "user typed a slightly longer replacement"
+    into a hard export failure, which breaks the whole download for one
+    oversized field. This retries at progressively smaller sizes, and if
+    it still won't fit at the floor size, grows the box downward
+    (bounded by the page) as a last resort, so a real edit is never
+    lost just because it's longer than the original text."""
+    size = fontsize
+    rc = page.insert_textbox(rect, text, fontsize=size, fontname=fontname, color=color, align=align)
+    while rc < 0 and size > min_fontsize:
+        size = max(size * 0.85, min_fontsize)
+        rc = page.insert_textbox(rect, text, fontsize=size, fontname=fontname, color=color, align=align)
+    if rc < 0:
+        expanded = fitz.Rect(rect.x0, rect.y0, rect.x1, min(rect.y1 + max_expand, page.rect.height))
+        rc = page.insert_textbox(expanded, text, fontsize=size, fontname=fontname, color=color, align=align)
+    return rc
+
+
+def _resolve_font_for_text(page: "fitz.Page", text: str, fallback_fontname: str, registered_pages: set) -> str:
+    """Returns the fontname to pass to insert_textbox for this text: the
+    normal base-14 mapped font for plain Latin text, or the embedded
+    Unicode font (registered on this page at most once) for Bengali."""
+    if not _contains_bengali(text):
+        return fallback_fontname
+    if page.number not in registered_pages:
+        page.insert_font(fontname=_UNICODE_FONTNAME, fontfile=_BENGALI_FONT_PATH)
+        registered_pages.add(page.number)
+    return _UNICODE_FONTNAME
+
+
 def _hex_to_rgb01(hex_color: str) -> tuple[float, float, float]:
     hex_color = (hex_color or "#000000").lstrip("#")
     if len(hex_color) != 6:
@@ -89,7 +144,7 @@ def _sample_background_color(page: "fitz.Page", rect: "fitz.Rect") -> tuple[floa
         return (1.0, 1.0, 1.0)
 
 
-def _apply_text_edits(doc: "fitz.Document", document: DocumentModel, edits: Dict[str, str]) -> None:
+def _apply_text_edits(doc: "fitz.Document", document: DocumentModel, edits: Dict[str, str], unicode_font_pages: set) -> None:
     elements_by_id: Dict[str, TextElement] = {}
     for page in document.pages:
         for el in page.text_elements:
@@ -134,9 +189,9 @@ def _apply_text_edits(doc: "fitz.Document", document: DocumentModel, edits: Dict
             elif el.alignment == "justify":
                 align = fitz.TEXT_ALIGN_JUSTIFY
 
-            rc = page.insert_textbox(
-                insert_rect, new_text, fontsize=el.font_size,
-                fontname=el.mapped_font, color=color, align=align,
+            fontname = _resolve_font_for_text(page, new_text, el.mapped_font, unicode_font_pages)
+            rc = _insert_textbox_fit(
+                page, insert_rect, new_text, el.font_size, fontname, color, align,
             )
             if rc < 0:
                 raise PdfExportError(f"Edited text for element {element_id} could not be laid out.")
@@ -152,7 +207,7 @@ def _resolve_new_text_font(obj: NewTextObject) -> str:
     return "helv"
 
 
-def _apply_canvas_objects(doc: "fitz.Document", objects_by_page: Dict[str, list]) -> None:
+def _apply_canvas_objects(doc: "fitz.Document", objects_by_page: Dict[str, list], unicode_font_pages: set) -> None:
     """Bakes drawings, shapes, highlights, new text boxes, and image
     add/move/resize onto their ORIGINAL page indices. Must run before
     `_apply_page_ops`, which is the only step allowed to change page
@@ -235,9 +290,9 @@ def _apply_canvas_objects(doc: "fitz.Document", objects_by_page: Dict[str, list]
                     align = fitz.TEXT_ALIGN_CENTER
                 elif obj.align == "right":
                     align = fitz.TEXT_ALIGN_RIGHT
-                page.insert_textbox(
-                    rect, obj.text, fontsize=obj.font_size,
-                    fontname=_resolve_new_text_font(obj), color=_hex_to_rgb01(obj.color), align=align,
+                fontname = _resolve_font_for_text(page, obj.text, _resolve_new_text_font(obj), unicode_font_pages)
+                _insert_textbox_fit(
+                    page, rect, obj.text, obj.font_size, fontname, _hex_to_rgb01(obj.color), align,
                 )
                 if obj.underline:
                     uy = obj.y + obj.font_size * 1.05
@@ -321,10 +376,15 @@ def export_pdf(original_path: str, output_path: str, document: DocumentModel, st
             else document.page_count
         )
 
+        # Tracks which page numbers already have the embedded Bengali
+        # Unicode font registered, so it's embedded at most once per page
+        # no matter how many Bengali text edits/boxes land on it.
+        unicode_font_pages: set = set()
+
         # Order matters: content edits first (against ORIGINAL indices),
         # page delete/reorder always last.
-        _apply_text_edits(doc, document, state.text_edits)
-        _apply_canvas_objects(doc, state.objects_by_page)
+        _apply_text_edits(doc, document, state.text_edits, unicode_font_pages)
+        _apply_canvas_objects(doc, state.objects_by_page, unicode_font_pages)
         _apply_page_ops(doc, state.page_ops)
 
         doc.save(tmp_output_path, garbage=4, deflate=True)
