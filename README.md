@@ -1,9 +1,25 @@
-# PDF Text-Editing Core (local build, pass 1)
+# PDF Editor (backend hardened + full live editor UI)
 
-This is the **real text-editing core** of the full PDF editor spec — the
-hardest and most important requirement — built to run locally on your
-machine. It is deliberately scoped: no UI shell, no OCR, no database, no
-Railway deployment yet. Those are the next passes.
+This build has two layers:
+
+1. **Backend (`backend/`)** — real PDF editing with PyMuPDF: text edit,
+   drawings/shapes/highlights, new text boxes, image add/move/resize,
+   and page rotate/delete/reorder. Every one of these is baked into a
+   real, downloadable PDF — none of it is preview-only.
+2. **Frontend (`frontend/public/`)** — a professional live editor:
+   `pdf.js` renders the real original page as the visual background,
+   `Fabric.js` renders an interactive overlay on top (drag/resize/
+   rotate/select), with a top bar, page-thumbnail sidebar (drag to
+   reorder, rotate, delete), a tool row (select/text/draw/line/arrow/
+   shape/highlight/image/search), a contextual properties panel, and a
+   status bar. Undo/redo, autosave, and Save/Download all operate on
+   one unambiguous state object that's kept in sync with what actually
+   gets exported.
+
+The previous version of this project was a **text-only backend** with a
+bare-bones test harness frontend (kept for reference at
+`frontend/public/legacy-test-harness.html`) — none of the drawing/
+image/page-management/undo-redo functionality existed before this pass.
 
 ## What this actually does
 
@@ -11,24 +27,59 @@ Railway deployment yet. Those are the next passes.
   structured element with its **real** bounding box, font name, size,
   weight, style, and color — straight from the PDF content stream, not
   guessed from rendering.
-- Lets you edit any text element's content, and run search/replace
-  across the whole document.
-- On export, it **redacts** the original glyphs (a real content-stream
-  operation, not a visual cover-up) and re-inserts your edited text at
-  the same position using the closest matching font, so the layout
-  stays close to the original. Every element you didn't touch — other
-  text, images, vector graphics — is left completely untouched.
-- Ships with a small HTML test harness so you can see the whole loop
-  (upload → edit → export → download a real PDF) without waiting for
-  the full desktop UI.
+- Lets you edit any text element's content in place (click to edit,
+  right on the real rendered page), run search/replace across the
+  whole document, draw freehand, add lines/arrows/rectangles/
+  highlights, add new text boxes and images, move/resize/rotate
+  existing images, and rotate/delete/reorder whole pages.
+- On export, everything above is baked into a real PDF: text edits are
+  **redacted** (a real content-stream operation, not a visual cover-up)
+  and reinserted; drawings/shapes/new text/images are inserted as real
+  vector/text/image PDF content; page operations set the real
+  `/Rotate` entry and reorder/delete pages via PyMuPDF's `Document.select()`.
+  Every element you didn't touch — other text, images, vector graphics,
+  untouched pages — is left completely alone.
+- Download always reflects the current live state, even if you forgot
+  to click Save first — see `_ensure_export_is_current` in `main.py`.
 
-## I could not test-run this myself
+## Known, documented limitations (not hidden)
+
+- **Live preview font rendering is an approximation.** While you're
+  editing a text span, the on-screen preview uses a generic font
+  (matched by weight/style/serif-vs-sans) rather than the PDF's exact
+  embedded font — the **final exported PDF** uses PyMuPDF's real font
+  matching and is more accurate than the live preview. This is a
+  common tradeoff in browser-based PDF editors; a pixel-exact live
+  preview would need embedding/rendering the original font in-browser.
+- **Arrow tool**: the live preview shows a plain line while dragging;
+  the arrowhead only appears in the exported PDF. Cosmetic only.
+- **Rotation is locked** on drawings, lines/arrows, rectangles, and
+  highlights in this pass (only images and text boxes support rotate)
+  — this was a deliberate scope cut to avoid shipping unverified
+  transform-matrix math (see "I could not test-run this" below).
+- **Moved images**: if you move an existing image, then navigate away
+  and back without ever exporting, the live preview is cached
+  client-side so it still looks right; a moved image's real pixels are
+  always re-extracted from the original PDF at export time regardless
+  (`source_xref`), so the exported file is correct even if a preview
+  cache were ever missing.
+- Text edits still don't reflow paragraphs (documented in the original
+  pass 1 notes below) — long replacement text auto-shrinks to fit the
+  box rather than wrapping to a new line.
+
+## I could not test-run any of this myself
 
 The sandbox I built this in has no network access, so I couldn't `pip
-install` PyMuPDF/FastAPI or actually execute the server here. I've
-written and reviewed the code carefully against the PyMuPDF API, but
-you should treat this as "ready to try," not "verified passing" —
-please run it and tell me what breaks so I can fix it fast.
+install` PyMuPDF/FastAPI, run `npm`, or load the frontend in an actual
+browser. I compiled every Python file and syntax-checked the JS with
+Node, and reasoned through the PyMuPDF/Fabric.js/pdf.js APIs carefully
+against my knowledge of them, catching and fixing several real bugs
+that way (a page-rotation double-counting bug, and a Fabric.js
+Line/Polyline coordinate bug, among others) — but "carefully reasoned
+through" is not the same as "verified passing in a browser." Please
+run it, and treat the first real test pass as expected to surface a
+few issues — that's normal for a build this size done without a
+runtime to check it against, not a sign the approach is wrong.
 
 ## Local setup
 
@@ -131,15 +182,20 @@ next.
 
 | Full spec piece | Status |
 |---|---|
-| Real text extraction & editable model | ✅ this pass |
-| Real PDF reconstruction (redact + reinsert) | ✅ this pass |
-| Search & replace | ✅ this pass |
+| Real text extraction & editable model | ✅ |
+| Real PDF reconstruction (redact + reinsert) | ✅ |
+| Search & replace | ✅ |
+| Live editor UI (top bar/sidebar/canvas/properties/status bar) | ✅ this pass |
+| Drawing, lines/arrows/rectangles, highlights | ✅ this pass (baked into real PDF content) |
+| New text boxes, image add/move/resize | ✅ this pass (baked into real PDF content) |
+| Page rotate/delete/reorder, thumbnails, drag-reorder | ✅ this pass |
+| Undo/redo | ✅ this pass (full-state snapshots) |
+| Save / Export / Download never stale | ✅ this pass |
 | Font embedding (not just matching) | 🔜 next |
 | Paragraph reflow | 🔜 next |
 | OCR for scanned PDFs (Tesseract/PaddleOCR) | 🔜 next |
-| Desktop editor UI (toolbar/pages/canvas/properties) | 🔜 next |
-| Images/shapes/annotations/signature/redaction UI | 🔜 next |
-| Auth, projects, autosave | 🔜 next |
+| Signature tool, redaction-as-a-feature (vs. as an internal mechanism) | 🔜 next |
+| Auth, projects, per-user storage | 🔜 next |
 | PostgreSQL + Redis + workers + Railway deploy | 🔜 later |
 
 ## Project layout
@@ -147,10 +203,15 @@ next.
 ```
 backend/
   app/
-    main.py              FastAPI routes
-    models.py             DocumentModel / TextElement / ImageElement schemas
+    main.py              FastAPI routes (documents, elements, search/replace,
+                          state, export, download)
+    models.py             DocumentModel / TextElement / ImageElement schemas,
+                          plus EditorState / PageOps / CanvasObject (drawings,
+                          shapes, highlights, new text, images)
     pdf_parser.py          PDF -> DocumentModel (the extraction logic)
-    pdf_reconstructor.py   DocumentModel + edits -> real PDF (the reconstruction logic)
+    pdf_reconstructor.py   DocumentModel + EditorState -> real PDF (redact/
+                          reinsert text, draw shapes, insert images, rotate/
+                          delete/reorder pages)
     search.py              search/replace over the document model
     storage.py              local dev storage (swap point for DB + object storage)
   requirements.txt
@@ -161,5 +222,15 @@ frontend/
   package.json
   railway.json             Railway build/start config for this service
   public/
-    index.html             functional test UI (not the final desktop editor)
+    index.html              the live editor shell (top bar, sidebar, canvas, context panel, toolbar, status bar)
+    editor.css               design tokens + layout + responsive/mobile styles
+    editor.js                 all editor logic: pdf.js rendering, Fabric.js overlay,
+                              tools, undo/redo, save/export/download
+    legacy-test-harness.html   the earlier plain-text-only test UI, kept for reference
 ```
+
+The editor loads `pdf.js` and `Fabric.js` from cdnjs at runtime (see the
+`<script>` tags at the bottom of `index.html`) — the deployed frontend
+needs outbound access to `cdnjs.cloudflare.com` in the user's browser
+(this is normal for any site using a CDN; it's not a server-side
+dependency, so it doesn't affect your Railway build).

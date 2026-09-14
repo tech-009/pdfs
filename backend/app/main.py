@@ -10,8 +10,11 @@ Endpoints:
     PATCH  /documents/{document_id}/elements/{element_id}   edit one text element
     POST   /documents/{document_id}/search       search all text elements
     POST   /documents/{document_id}/replace      replace across all text elements
-    POST   /documents/{document_id}/export       reconstruct a real PDF with edits applied
-    GET    /documents/{document_id}/download     download the exported PDF
+    PUT    /documents/{document_id}/state        save the full editor state (drawings, shapes,
+                                                   images, new text, page rotate/delete/reorder)
+    POST   /documents/{document_id}/export       reconstruct a real PDF with all edits applied
+    GET    /documents/{document_id}/download     download the edited PDF (always regenerates
+                                                   if the state changed since the last export)
 
 See ../README.md for setup, limitations, and how this maps onto the
 full production architecture (auth, DB, queue, OCR, Railway).
@@ -35,6 +38,8 @@ from .models import (
     ReplaceRequest,
     ReplaceResponse,
     ExportResponse,
+    EditorState,
+    SaveStateResponse,
 )
 from .pdf_parser import parse_pdf
 from .pdf_reconstructor import export_pdf, PdfExportError
@@ -61,6 +66,11 @@ app.add_middleware(
     allow_origins=_allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this, the browser silently hides Content-Disposition on
+    # cross-origin responses (frontend and backend are different Railway
+    # domains) — the frontend has a same-convention fallback filename if
+    # this header isn't readable, but exposing it avoids relying on that.
+    expose_headers=["Content-Disposition"],
 )
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50MB — adjust for real usage
@@ -161,6 +171,25 @@ async def replace_in_document(document_id: str, body: ReplaceRequest):
     return ReplaceResponse(replaced_count=count, updated_element_ids=updated_ids)
 
 
+@app.put("/documents/{document_id}/state", response_model=SaveStateResponse)
+async def save_state(document_id: str, body: EditorState):
+    """Saves the FULL live-editor state in one call: text edits, every
+    drawing/shape/highlight/new-text/image object per page, and any page
+    rotate/delete/reorder. The frontend sends this as a whole blob (not
+    incremental ops), debounced during editing and always flushed
+    immediately before Export/Download, so there is always exactly one
+    unambiguous state to bake into the final PDF."""
+    record = store.get(document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    record.edits = dict(body.text_edits)
+    record.objects_by_page = {k: list(v) for k, v in body.objects_by_page.items()}
+    record.page_ops = body.page_ops
+    record.edits_version += 1  # marks any existing export as stale
+    return SaveStateResponse(document_id=document_id, edits_version=record.edits_version)
+
+
 def _download_filename(original_filename: str) -> str:
     stem, ext = os.path.splitext(original_filename or "document.pdf")
     if ext.lower() != ".pdf":
@@ -182,10 +211,15 @@ async def _ensure_export_is_current(document_id: str, record: DocumentRecord) ->
             return record.exported_path
 
         output_path = store.export_path_for(document_id)
-        edits_snapshot = dict(record.edits)  # freeze what we're exporting
+        # Freeze the full state we're exporting so nothing mutates mid-write.
+        state_snapshot = EditorState(
+            text_edits=dict(record.edits),
+            page_ops=record.page_ops,
+            objects_by_page={k: list(v) for k, v in record.objects_by_page.items()},
+        )
         target_version = record.edits_version
         try:
-            export_pdf(record.original_path, output_path, record.document, edits_snapshot)
+            export_pdf(record.original_path, output_path, record.document, state_snapshot)
         except PdfExportError as exc:
             logger.exception("Failed to export PDF: %s", exc)
             raise HTTPException(status_code=500, detail="Failed to generate the edited PDF. Please try again.") from exc

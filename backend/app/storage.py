@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from .models import DocumentModel
+from .models import DocumentModel, PageOps
 
 STORAGE_DIR = os.path.join(os.path.dirname(__file__), "..", "storage")
 os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -32,11 +32,15 @@ class DocumentRecord:
     document: DocumentModel
     original_path: str
     edits: Dict[str, str] = field(default_factory=dict)  # element_id -> new text
+    # Canvas objects (drawings/shapes/highlights/new text/image add-move-resize),
+    # keyed by ORIGINAL page index as a string. Page rotate/delete/reorder.
+    objects_by_page: Dict[str, list] = field(default_factory=dict)
+    page_ops: Optional[PageOps] = None
     exported_path: Optional[str] = None
-    # Bumped on every edit/replace; compared against `exported_edits_version`
-    # so we always know whether the last export on disk is stale relative
-    # to the in-memory edits. This is what prevents "download gave me an
-    # old version" — see main.py's download route.
+    # Bumped on every edit/replace/state save; compared against
+    # `exported_edits_version` so we always know whether the last export on
+    # disk is stale relative to the in-memory state. This is what prevents
+    # "download gave me an old version" — see main.py's download route.
     edits_version: int = 0
     exported_edits_version: int = -1
     # Serializes export/download for a single document so two overlapping

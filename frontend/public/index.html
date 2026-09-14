@@ -2,175 +2,175 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>PDF Text-Editing Core — Test Harness</title>
-<style>
-  body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; background: #f4f5f7; color: #1c1e21; }
-  header { background: #1c1e21; color: white; padding: 14px 20px; font-size: 15px; }
-  header b { color: #ffb454; }
-  .layout { display: flex; height: calc(100vh - 48px); }
-  .left { width: 340px; padding: 16px; background: white; border-right: 1px solid #ddd; overflow-y: auto; }
-  .right { flex: 1; padding: 16px; overflow-y: auto; }
-  h3 { margin-top: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #666; }
-  input[type=text] { width: 100%; padding: 6px 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
-  button { background: #2563eb; color: white; border: none; padding: 7px 12px; border-radius: 4px; font-size: 13px; cursor: pointer; margin-top: 6px; }
-  button.secondary { background: #eee; color: #222; }
-  button:hover { filter: brightness(1.08); }
-  .page-block { background: white; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 16px; padding: 12px; }
-  .page-block h4 { margin: 0 0 8px; font-size: 12px; color: #888; font-weight: 600; }
-  .element-row { display: flex; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid #f0f0f0; }
-  .element-row:last-child { border-bottom: none; }
-  .meta { font-size: 10px; color: #999; width: 170px; flex-shrink: 0; }
-  .element-row input { flex: 1; }
-  .edited { background: #fff8e1 !important; }
-  #status { font-size: 12px; margin-top: 8px; color: #555; }
-  .row { display: flex; gap: 6px; margin-bottom: 6px; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>PDF Editor</title>
+<link rel="stylesheet" href="/editor.css" />
 </head>
 <body>
 <script src="/config.js"></script>
-<header>PDF Text-Editing Core — <b>Test Harness</b> (not the final desktop UI — see README)</header>
-<div class="layout">
-  <div class="left">
-    <h3>1. Upload</h3>
-    <input type="file" id="fileInput" accept="application/pdf" />
-    <div id="status"></div>
 
-    <h3 style="margin-top:20px;">2. Search &amp; Replace</h3>
-    <div class="row"><input type="text" id="searchQuery" placeholder="Find..." /></div>
-    <div class="row"><input type="text" id="replaceText" placeholder="Replace with..." /></div>
-    <div class="row">
-      <label style="font-size:12px;"><input type="checkbox" id="caseSensitive" /> Case sensitive</label>
+<!-- ============ UPLOAD / EMPTY STATE ============ -->
+<div id="uploadScreen" class="upload-screen">
+  <div class="upload-card">
+    <div class="upload-mark" aria-hidden="true">
+      <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+        <path d="M8 4h17l7 7v25a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M25 4v7h7" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M20 17v11M15 23l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
     </div>
-    <div class="row">
-      <label style="font-size:12px;"><input type="checkbox" id="wholeWord" /> Whole word</label>
-    </div>
-    <div class="row">
-      <button onclick="doSearch()">Search</button>
-      <button class="secondary" onclick="doReplace()">Replace all</button>
-    </div>
-    <div id="searchResults" style="font-size:12px; margin-top:8px;"></div>
-
-    <h3 style="margin-top:20px;">3. Export</h3>
-    <button onclick="doExport()">Export edited PDF</button>
-    <div id="exportStatus" style="font-size:12px; margin-top:8px;"></div>
-  </div>
-
-  <div class="right" id="pagesContainer">
-    <p style="color:#999;">Upload a PDF to see its extracted, per-run editable text elements — real font, size, color and position, read straight out of the PDF content stream.</p>
+    <h1>Open a PDF to start editing</h1>
+    <p>Text, drawings, images and page layout — edited live, baked into a real PDF you can download.</p>
+    <label class="btn btn-primary btn-lg" for="fileInput">Choose a PDF</label>
+    <input type="file" id="fileInput" accept="application/pdf" hidden />
+    <div id="uploadStatus" class="upload-status" role="status"></div>
   </div>
 </div>
 
-<script>
-// window.__API_BASE__ is injected at request time by server.js from the
-// API_BASE_URL environment variable — see /config.js. Falls back to
-// localhost for local dev without the Node server (e.g. opening this
-// file directly, or `python -m http.server`).
-const API = window.__API_BASE__ || "http://localhost:8000";
-let documentId = null;
-let documentModel = null;
+<!-- ============ EDITOR SHELL ============ -->
+<div id="editorShell" class="editor-shell" hidden>
 
-document.getElementById("fileInput").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  setStatus("Uploading & parsing...");
-  const form = new FormData();
-  form.append("file", file);
-  try {
-    const res = await fetch(`${API}/documents`, { method: "POST", body: form });
-    if (!res.ok) throw new Error((await res.json()).detail || "Upload failed");
-    documentModel = await res.json();
-    documentId = documentModel.id;
-    setStatus(`Loaded "${documentModel.filename}" — ${documentModel.page_count} page(s).`);
-    renderPages();
-  } catch (err) {
-    setStatus("Error: " + err.message);
-  }
-});
+  <header class="topbar">
+    <div class="topbar-group">
+      <button id="btnHome" class="icon-btn" title="Back to upload" aria-label="Back to upload">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M15 5 8 12l7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <span id="docName" class="doc-name">document.pdf</span>
+    </div>
 
-function setStatus(msg) { document.getElementById("status").textContent = msg; }
+    <div class="topbar-group topbar-tools">
+      <button id="btnUndo" class="icon-btn" title="Undo (Ctrl+Z)" disabled>
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M7 7 3 11l4 4M3 11h11a6 6 0 0 1 0 12h-2" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="btnRedo" class="icon-btn" title="Redo (Ctrl+Y)" disabled>
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M17 7l4 4-4 4M21 11H10a6 6 0 0 0 0 12h2" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <span class="divider"></span>
+      <button id="btnZoomOut" class="icon-btn" title="Zoom out">−</button>
+      <span id="zoomLabel" class="zoom-label">100%</span>
+      <button id="btnZoomIn" class="icon-btn" title="Zoom in">+</button>
+      <button id="btnZoomFit" class="icon-btn small-label" title="Fit page">Fit</button>
+    </div>
 
-function renderPages() {
-  const container = document.getElementById("pagesContainer");
-  container.innerHTML = "";
-  documentModel.pages.forEach(page => {
-    const block = document.createElement("div");
-    block.className = "page-block";
-    block.innerHTML = `<h4>Page ${page.number + 1} — ${Math.round(page.width)}×${Math.round(page.height)}pt, ${page.text_elements.length} text runs, ${page.image_elements.length} images</h4>`;
-    page.text_elements.forEach(el => {
-      const row = document.createElement("div");
-      row.className = "element-row";
-      row.innerHTML = `
-        <span class="meta">${el.font_family}, ${Math.round(el.font_size)}pt${el.font_weight === 'bold' ? ', bold' : ''}${el.font_style === 'italic' ? ', italic' : ''}, <span style="color:${el.color}">■</span></span>
-        <input type="text" value="${escapeAttr(el.text)}" data-id="${el.id}" />
-      `;
-      const input = row.querySelector("input");
-      input.addEventListener("change", () => editElement(el.id, input.value, input));
-      container.appendChild(row);
-      block.appendChild(row);
-    });
-    container.appendChild(block);
-  });
-}
+    <div class="topbar-group">
+      <span id="saveStatus" class="save-status">All changes saved</span>
+      <button id="btnSave" class="btn btn-ghost">Save</button>
+      <button id="btnDownload" class="btn btn-primary">Download PDF</button>
+    </div>
+  </header>
 
-function escapeAttr(s) { return s.replace(/"/g, "&quot;"); }
+  <div class="body">
+    <!-- LEFT SIDEBAR: pages -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <span>Pages</span>
+        <button id="btnToggleSidebar" class="icon-btn mobile-only" title="Hide pages">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div id="pageList" class="page-list"></div>
+    </aside>
+    <button id="btnShowSidebar" class="icon-btn mobile-only show-sidebar-btn" title="Show pages">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
 
-async function editElement(elementId, newText, inputEl) {
-  const res = await fetch(`${API}/documents/${documentId}/elements/${elementId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: newText }),
-  });
-  if (res.ok) {
-    inputEl.classList.add("edited");
-    setStatus("Edit saved locally — click Export to generate the real PDF.");
-  } else {
-    setStatus("Edit failed: " + (await res.json()).detail);
-  }
-}
+    <!-- CENTER: canvas -->
+    <main class="canvas-area" id="canvasArea">
+      <div class="canvas-scroll" id="canvasScroll">
+        <div class="canvas-stage" id="canvasStage">
+          <canvas id="fabricCanvas"></canvas>
+        </div>
+      </div>
+      <div id="canvasOverlay" class="canvas-overlay" hidden>
+        <div class="spinner"></div>
+        <span id="overlayMessage">Loading…</span>
+      </div>
+    </main>
 
-async function doSearch() {
-  const query = document.getElementById("searchQuery").value;
-  const case_sensitive = document.getElementById("caseSensitive").checked;
-  const whole_word = document.getElementById("wholeWord").checked;
-  const res = await fetch(`${API}/documents/${documentId}/search`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, case_sensitive, whole_word }),
-  });
-  const matches = await res.json();
-  document.getElementById("searchResults").innerHTML =
-    matches.length
-      ? `${matches.length} match(es): ` + matches.map(m => `p${m.page + 1}: "${m.text}"`).join("<br/>")
-      : "No matches.";
-}
+    <!-- RIGHT: context toolbar -->
+    <aside class="context-panel" id="contextPanel" hidden>
+      <div class="context-head">
+        <span id="contextTitle">Properties</span>
+        <button id="btnCloseContext" class="icon-btn" title="Close">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div id="contextBody" class="context-body"></div>
+      <button id="btnDeleteObject" class="btn btn-danger-ghost">Delete object</button>
+    </aside>
+  </div>
 
-async function doReplace() {
-  const query = document.getElementById("searchQuery").value;
-  const replacement = document.getElementById("replaceText").value;
-  const case_sensitive = document.getElementById("caseSensitive").checked;
-  const whole_word = document.getElementById("wholeWord").checked;
-  const res = await fetch(`${API}/documents/${documentId}/replace`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, replacement, case_sensitive, whole_word, replace_all: true }),
-  });
-  const result = await res.json();
-  setStatus(`Replaced ${result.replaced_count} occurrence(s).`);
-  // refresh the model to reflect the replacement in the UI
-  const docRes = await fetch(`${API}/documents/${documentId}`);
-  documentModel = await docRes.json();
-  renderPages();
-}
+  <!-- BOTTOM TOOLBAR: tools -->
+  <div class="toolbar" id="toolbar">
+    <button class="tool-btn active" data-tool="select" title="Select">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 3l14 8-6 2-2 6-6-16Z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg>
+      <span>Select</span>
+    </button>
+    <button class="tool-btn" data-tool="text" title="Add text">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 5h14M12 5v14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>Text</span>
+    </button>
+    <button class="tool-btn" data-tool="draw" title="Draw">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 20l1-4L16 5l3 3L8 19l-4 1Z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg>
+      <span>Draw</span>
+    </button>
+    <button class="tool-btn" data-tool="line" title="Line">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 19 19 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>Line</span>
+    </button>
+    <button class="tool-btn" data-tool="arrow" title="Arrow">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 19 19 5M19 5h-6M19 5v6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Arrow</span>
+    </button>
+    <button class="tool-btn" data-tool="rect" title="Rectangle">
+      <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="6" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+      <span>Shape</span>
+    </button>
+    <button class="tool-btn" data-tool="highlight" title="Highlight">
+      <svg viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="9" width="18" height="7" rx="1" fill="currentColor" opacity=".35"/><path d="M5 19h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>Highlight</span>
+    </button>
+    <button class="tool-btn" data-tool="image" title="Add image">
+      <svg viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="8.5" cy="9.5" r="1.5" fill="currentColor"/><path d="m4 17 5-5 4 4 3-3 4 4" stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/></svg>
+      <span>Image</span>
+    </button>
+    <input type="file" id="imageInput" accept="image/*" hidden />
+    <button class="tool-btn" data-tool="search" title="Search &amp; replace">
+      <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>Find</span>
+    </button>
+  </div>
 
-async function doExport() {
-  document.getElementById("exportStatus").textContent = "Exporting...";
-  const res = await fetch(`${API}/documents/${documentId}/export`, { method: "POST" });
-  if (!res.ok) {
-    document.getElementById("exportStatus").textContent = "Export failed: " + (await res.json()).detail;
-    return;
-  }
-  const result = await res.json();
-  document.getElementById("exportStatus").innerHTML =
-    `<a href="${API}${result.download_url}" target="_blank">Download edited PDF</a>`;
-}
-</script>
+  <!-- SEARCH & REPLACE PANEL -->
+  <div id="searchPanel" class="search-panel" hidden>
+    <input type="text" id="searchQuery" placeholder="Find…" />
+    <input type="text" id="replaceText" placeholder="Replace with…" />
+    <label class="check-label"><input type="checkbox" id="caseSensitive" /> Case sensitive</label>
+    <label class="check-label"><input type="checkbox" id="wholeWord" /> Whole word</label>
+    <button id="btnSearch" class="btn btn-ghost">Search</button>
+    <button id="btnReplaceAll" class="btn btn-primary">Replace all</button>
+    <span id="searchResultCount" class="search-result-count"></span>
+    <button id="btnCloseSearch" class="icon-btn" title="Close">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
+  <!-- STATUS BAR -->
+  <footer class="statusbar">
+    <span id="pageIndicator">Page 1 of 1</span>
+    <span class="statusbar-sep">·</span>
+    <span id="zoomIndicator">100%</span>
+    <span class="statusbar-sep">·</span>
+    <span id="statusMessage">Ready</span>
+  </footer>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<!-- pdf.js: renders the real original PDF pages as the visual background -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- Fabric.js: interactive canvas objects (drag/resize/rotate/select) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+<script src="/editor.js"></script>
 </body>
 </html>
