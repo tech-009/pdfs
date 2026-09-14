@@ -256,6 +256,13 @@ async def download_document(document_id: str):
         output_path,
         media_type="application/pdf",
         filename=_download_filename(record.document.filename),
+        # The URL is identical across repeated downloads of the same
+        # document even though the file's bytes change after every new
+        # edit — without this, a browser (or any intermediary cache) can
+        # legally serve a stale previous download instead of re-fetching,
+        # which is exactly the "second download still has the old edit"
+        # bug. no-store forces every download click to hit the server.
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
 

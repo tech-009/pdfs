@@ -176,6 +176,17 @@
     fabricCanvas.on("mouse:up", onCanvasMouseUp);
 
     document.addEventListener("keydown", (e) => {
+      // Ctrl/Cmd+S must work as "Save" even while actively typing inside a
+      // text box — so it's checked before the isEditingText early-return,
+      // and it browser-preventDefaults first so the OS "Save Page" dialog
+      // never appears. flushSave() itself calls commitActiveTextEditing(),
+      // so the in-progress edit is captured correctly either way.
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        $("btnSave").click();
+        return;
+      }
+
       const tag = (document.activeElement && document.activeElement.tagName) || "";
       const isEditingText = tag === "INPUT" || tag === "TEXTAREA" ||
         (fabricCanvas.getActiveObject() && fabricCanvas.getActiveObject().isEditing);
@@ -1219,33 +1230,62 @@
     dirty = true;
     setSaveStatus("unsaved");
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(performSave, 1200);
+    saveTimer = setTimeout(() => { queueSave(); }, 1200);
+  }
+
+  // If the user is still actively typing inside a text box (existing-text
+  // edit OR a brand-new text box) when Save/Download is clicked, that last
+  // keystroke never reaches state.textEdits / the object model — it only
+  // commits on fabric's "editing:exited" event, which a button click does
+  // NOT fire. That's the root cause of "I edited it but the download
+  // doesn't have my last change": Save/Download must force any in-progress
+  // text edit to commit BEFORE state is read, not just whenever the user
+  // happens to click away first.
+  function commitActiveTextEditing() {
+    if (!fabricCanvas) return;
+    const obj = fabricCanvas.getActiveObject();
+    if (obj && obj.isEditing && typeof obj.exitEditing === "function") {
+      obj.exitEditing(); // synchronously fires "editing:exited" -> commitTextEdit / the new-text handler
+    }
+  }
+
+  // Saves are chained (never fired concurrently) so a slow save in flight
+  // can't be overtaken and overwritten by a later one that started after
+  // it but whose response arrives first — the classic async/race path to
+  // "download used a stale state".
+  let saveChain = Promise.resolve();
+
+  function queueSave() {
+    clearTimeout(saveTimer);
+    saveChain = saveChain.then(performSave, performSave);
+    saveInFlight = saveChain;
+    return saveChain;
   }
 
   async function performSave() {
-    if (!state.documentId) return;
+    if (!state.documentId || !dirty) return;
     setSaveStatus("saving");
     const payload = buildEditorStatePayload();
-    saveInFlight = apiFetch(`/documents/${state.documentId}/state`, {
-      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-    });
+    dirty = false; // cleared BEFORE the request: any edit made during the request re-flags dirty for the next save
     try {
-      await saveInFlight;
-      dirty = false;
+      await apiFetch(`/documents/${state.documentId}/state`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
       setSaveStatus("saved");
     } catch (err) {
+      dirty = true; // restore — nothing was actually persisted, so the retry must resend it
       setSaveStatus("error");
       toast(friendlyError(err, "Couldn't save your changes — will retry."), true);
       clearTimeout(saveTimer);
-      saveTimer = setTimeout(performSave, 4000);
-    } finally {
-      saveInFlight = null;
+      saveTimer = setTimeout(() => queueSave(), 4000);
     }
   }
 
   async function flushSave() {
+    commitActiveTextEditing();
     clearTimeout(saveTimer);
-    if (dirty || saveInFlight) await performSave();
+    if (dirty) { await queueSave(); return; }
+    if (saveInFlight) await saveInFlight;
   }
 
   $("btnSave").addEventListener("click", async () => {
@@ -1265,7 +1305,7 @@
       const exportJson = await exportRes.json();
 
       setStatusMessage("Downloading…");
-      const fileRes = await apiFetch(exportJson.download_url, { method: "GET" });
+      const fileRes = await apiFetch(exportJson.download_url, { method: "GET", cache: "no-store" });
       const blob = await fileRes.blob();
       if (!blob || blob.size === 0) throw new Error("empty");
 
